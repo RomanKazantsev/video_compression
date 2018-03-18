@@ -164,7 +164,8 @@ void MotionEstimator::AdvancedSearch(MV &best_vector, std::unordered_map<ShiftDi
 	int log2_step_size = 0;
 	int tmp = step_size + 1;
 	while (tmp >>= 1) ++log2_step_size;
-	int max_steps = (4 * log2_step_size + 10) * prev_map.size();
+	int max_steps = 4 * log2_step_size + 10;
+	if (use_half_pixel) max_steps += 8;
 	int num_steps = std::max(5, max_steps * quality / 100);
 
 	best_vector.x = best_vector.y = 0;
@@ -177,15 +178,12 @@ void MotionEstimator::AdvancedSearch(MV &best_vector, std::unordered_map<ShiftDi
 	int left_index = i * BLOCK_SIZE + j - 1;
 
 	// try motion vector from the previous frame
-	for (const auto& prev_pair : prev_map) {
-		if (prev_pair.first == prev_mv_map[cur_ind].shift_dir) {
-			const auto prev = prev_pair.second + vert_offset + hor_offset;
-			best_vector.x = prev_mv_map[cur_ind].x;
-			best_vector.y = prev_mv_map[cur_ind].y;
-			auto const comp = prev + best_vector.y * width_ext + best_vector.x;
-			best_vector.error = GetErrorSAD_16x16(cur, comp, width_ext);
-		}
-	}
+	auto prev = prev_map.at(prev_mv_map[cur_ind].shift_dir) +
+		vert_offset + hor_offset;
+	best_vector.x = prev_mv_map[cur_ind].x;
+	best_vector.y = prev_mv_map[cur_ind].y;
+	auto comp = prev + best_vector.y * width_ext + best_vector.x;
+	best_vector.error = GetErrorSAD_16x16(cur, comp, width_ext);
 	if (best_vector.error < error_threshold) {
 		StoreBestMVInMap(best_vector, cur_ind);
 		return;
@@ -195,132 +193,210 @@ void MotionEstimator::AdvancedSearch(MV &best_vector, std::unordered_map<ShiftDi
 		return;
 	}
 
-	/*
-	const auto prev = prev_map.at(ShiftDir::NONE) + vert_offset + hor_offset;
-	for (const auto& prev_pair : prev_map) {
-		if (prev_pair.first == ShiftDir::NONE) {
-			prev = prev_pair.second + vert_offset + hor_offset;
-			prev = prev_map.at(ShiftDir::NONE);
+	// try MV of up block of the current frame
+	if (i > 0 &&
+		curr_mv_map[up_index].error != std::numeric_limits<long>::max()) {
+		prev = prev_map.at(curr_mv_map[up_index].shift_dir) +
+			vert_offset + hor_offset;
+		int tmp_x = curr_mv_map[up_index].x;
+		int tmp_y = curr_mv_map[up_index].y;
+		CheckAndUpdateBestMV(best_vector, curr_mv_map[up_index].shift_dir,
+			prev, cur, tmp_x, tmp_y);
+	}
+	if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+		StoreBestMVInMap(best_vector, cur_ind);
+		return;
+	}
+
+	// try MV of upleft block
+	if (i > 0 && j > 0 &&
+		curr_mv_map[upleft_index].error != std::numeric_limits<long>::max()) {
+		prev = prev_map.at(curr_mv_map[upleft_index].shift_dir) +
+			vert_offset + hor_offset;
+		int tmp_x = curr_mv_map[upleft_index].x;
+		int tmp_y = curr_mv_map[upleft_index].y;
+		CheckAndUpdateBestMV(best_vector, curr_mv_map[upleft_index].shift_dir,
+			prev, cur, tmp_x, tmp_y);
+	}
+	if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+		StoreBestMVInMap(best_vector, cur_ind);
+		return;
+	}
+
+	// try MV of upright block
+	if (i > 0 && j < (num_blocks_hor - 1) &&
+		curr_mv_map[upright_index].error != std::numeric_limits<long>::max()) {
+		prev = prev_map.at(curr_mv_map[upright_index].shift_dir) +
+			vert_offset + hor_offset;
+		int tmp_x = curr_mv_map[upright_index].x;
+		int tmp_y = curr_mv_map[upright_index].y;
+		CheckAndUpdateBestMV(best_vector, curr_mv_map[upright_index].shift_dir,
+			prev, cur, tmp_x, tmp_y);
+	}
+	if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+		StoreBestMVInMap(best_vector, cur_ind);
+		return;
+	}
+
+	// try MV of left block
+	if (j > 0 &&
+		curr_mv_map[left_index].error != std::numeric_limits<long>::max()) {
+		prev = prev_map.at(curr_mv_map[left_index].shift_dir) +
+			vert_offset + hor_offset;
+		int tmp_x = curr_mv_map[left_index].x;
+		int tmp_y = curr_mv_map[left_index].y;
+		CheckAndUpdateBestMV(best_vector, curr_mv_map[left_index].shift_dir,
+			prev, cur, tmp_x, tmp_y);
+	}
+	if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+		StoreBestMVInMap(best_vector, cur_ind);
+		return;
+	}
+
+	// gradient descent search
+	int cur_x = best_vector.x, cur_y = best_vector.y;
+	best_vector.shift_dir = ShiftDir::NONE;
+	prev = prev_map.at(best_vector.shift_dir) +
+		vert_offset + hor_offset;
+	comp = prev + best_vector.y * width_ext + best_vector.x;
+	best_vector.error = GetErrorSAD_16x16(cur, comp, width_ext);
+	if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+		StoreBestMVInMap(best_vector, cur_ind);
+		return;
+	}
+
+	while (step_size > 0) {
+		// check bottom left corner
+		int tmp_x = cur_x - step_size;
+		int tmp_y = cur_y - step_size;
+		if (tmp_x >= -BORDER && tmp_y >= -BORDER) {
+			CheckAndUpdateBestMV(best_vector, best_vector.shift_dir,
+				prev, cur, tmp_x, tmp_y);
+		}
+		if (best_vector.error < error_threshold) break;
+		if (--num_steps <= 0) {
+			StoreBestMVInMap(best_vector, cur_ind);
+			return;
+		}
+
+		// check top left corner
+		tmp_x = cur_x - step_size;
+		tmp_y = cur_y + step_size;
+		if (tmp_x >= -BORDER && tmp_y <= BORDER) {
+			CheckAndUpdateBestMV(best_vector, best_vector.shift_dir,
+				prev, cur, tmp_x, tmp_y);
+		}
+		if (best_vector.error < error_threshold) break;
+		if (--num_steps <= 0) {
+			StoreBestMVInMap(best_vector, cur_ind);
+			return;
+		}
+
+		// check top right corner
+		tmp_x = cur_x + step_size;
+		tmp_y = cur_y + step_size;
+		if (tmp_x <= BORDER && tmp_y <= BORDER) {
+			CheckAndUpdateBestMV(best_vector, best_vector.shift_dir, prev, cur, tmp_x, tmp_y);
+		}
+		if (best_vector.error < error_threshold) break;
+		if (--num_steps <= 0) {
+			StoreBestMVInMap(best_vector, cur_ind);
+			return;
+		}
+
+		// check bottom right corner
+		tmp_x = cur_x + step_size;
+		tmp_y = cur_y - step_size;
+		if (tmp_x <= BORDER && tmp_y >= -BORDER) {
+			CheckAndUpdateBestMV(best_vector, best_vector.shift_dir, prev, cur, tmp_x, tmp_y);
+		}
+		if (best_vector.error < error_threshold) break;
+
+		// update current block position
+		if (cur_x == best_vector.x && cur_y == best_vector.y) {
+			step_size /= 2;
+		}
+		else {
+			cur_x = best_vector.x;
+			cur_y = best_vector.y;
 		}
 	}
-	*/
 
-	for (const auto& prev_pair : prev_map) {
-		const auto prev = prev_pair.second + vert_offset + hor_offset;
-
-		// try MV of up block
-		if (i > 0 &&
-			curr_mv_map[up_index].error != std::numeric_limits<long>::max() &&
-			curr_mv_map[up_index].shift_dir == prev_pair.first) {
-			int tmp_x = curr_mv_map[up_index].x;
-			int tmp_y = curr_mv_map[up_index].y;
-			CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-		}
-		if (best_vector.error < error_threshold) break;
-		if (--num_steps <= 0) {
+	// try to find in half pixel distance
+	cur_x = best_vector.x;
+	cur_y = best_vector.y;
+	if (use_half_pixel) {
+		// left by half pixel
+		prev = prev_map.at(ShiftDir::LEFT) + vert_offset + hor_offset;
+		int tmp_x = cur_x;
+		int tmp_y = cur_y;
+		CheckAndUpdateBestMV(best_vector, ShiftDir::LEFT,
+			prev, cur, tmp_x, tmp_y);
+		if (best_vector.error < error_threshold || (--num_steps <= 0)) {
 			StoreBestMVInMap(best_vector, cur_ind);
 			return;
 		}
 
-		// try MV of upleft block
-		if (i > 0 && j > 0 &&
-			curr_mv_map[upleft_index].error != std::numeric_limits<long>::max() &&
-			curr_mv_map[upleft_index].shift_dir == prev_pair.first) {
-			int tmp_x = curr_mv_map[upleft_index].x;
-			int tmp_y = curr_mv_map[upleft_index].y;
-			CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-		}
-		if (best_vector.error < error_threshold) break;
-		if (--num_steps <= 0) {
-			StoreBestMVInMap(best_vector, cur_ind);
-			return;
-		}
-
-		// try MV of upright block
-		if (i > 0 && j < (num_blocks_hor - 1) &&
-			curr_mv_map[upright_index].error != std::numeric_limits<long>::max() &&
-			curr_mv_map[upright_index].shift_dir == prev_pair.first) {
-			int tmp_x = curr_mv_map[upright_index].x;
-			int tmp_y = curr_mv_map[upright_index].y;
-			CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-		}
-		if (best_vector.error < error_threshold) break;
-		if (--num_steps <= 0) {
-			StoreBestMVInMap(best_vector, cur_ind);
-			return;
-		}
-
-		// try MV of left block
-		if (j > 0 &&
-			curr_mv_map[left_index].error != std::numeric_limits<long>::max() &&
-			curr_mv_map[left_index].shift_dir == prev_pair.first) {
-			int tmp_x = curr_mv_map[left_index].x;
-			int tmp_y = curr_mv_map[left_index].y;
-			CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-		}
-		if (best_vector.error < error_threshold) break;
-		if (--num_steps <= 0) {
-			StoreBestMVInMap(best_vector, cur_ind);
-			return;
-		}
-
-		// gradient descent search
-		int cur_x = best_vector.x, cur_y = best_vector.y;
-		while (step_size > 0) {
-			// check bottom left corner
-			int tmp_x = cur_x - step_size;
-			int tmp_y = cur_y - step_size;
-			if (tmp_x >= -BORDER && tmp_y >= -BORDER) {
-				CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-			}
-			if (best_vector.error < error_threshold) break;
-			if (--num_steps <= 0) {
+		// right by half pixel
+		prev = prev_map.at(ShiftDir::LEFT) + vert_offset + hor_offset;
+		tmp_x = cur_x + 1;
+		tmp_y = cur_y;
+		if (tmp_x <= BORDER) {
+			CheckAndUpdateBestMV(best_vector, ShiftDir::LEFT,
+				prev, cur, tmp_x, tmp_y);
+			if (best_vector.error < error_threshold || (--num_steps <= 0)) {
 				StoreBestMVInMap(best_vector, cur_ind);
 				return;
 			}
+		}
 
-			// check top left corner
-			tmp_x = cur_x - step_size;
-			tmp_y = cur_y + step_size;
-			if (tmp_x >= -BORDER && tmp_y <= BORDER) {
-				CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-			}
-			if (best_vector.error < error_threshold) break;
-			if (--num_steps <= 0) {
+		// up by half pixel
+		prev = prev_map.at(ShiftDir::UP) + vert_offset + hor_offset;
+		tmp_x = cur_x;
+		tmp_y = cur_y;
+		CheckAndUpdateBestMV(best_vector, ShiftDir::UP,
+			prev, cur, tmp_x, tmp_y);
+		if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+			StoreBestMVInMap(best_vector, cur_ind);
+			return;
+		}
+
+		// down by half pixel
+		prev = prev_map.at(ShiftDir::UP) + vert_offset + hor_offset;
+		tmp_x = cur_x;
+		tmp_y = cur_y + 1;
+		if (tmp_y <= BORDER) {
+			CheckAndUpdateBestMV(best_vector, ShiftDir::UP,
+				prev, cur, tmp_x, tmp_y);
+			if (best_vector.error < error_threshold || (--num_steps <= 0)) {
 				StoreBestMVInMap(best_vector, cur_ind);
 				return;
-			}
-
-			// check top right corner
-			tmp_x = cur_x + step_size;
-			tmp_y = cur_y + step_size;
-			if (tmp_x <= BORDER && tmp_y <= BORDER) {
-				CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-			}
-			if (best_vector.error < error_threshold) break;
-			if (--num_steps <= 0) {
-				StoreBestMVInMap(best_vector, cur_ind);
-				return;
-			}
-
-			// check bottom right corner
-			tmp_x = cur_x + step_size;
-			tmp_y = cur_y - step_size;
-			if (tmp_x <= BORDER && tmp_y >= -BORDER) {
-				CheckAndUpdateBestMV(best_vector, prev_pair.first, prev, cur, tmp_x, tmp_y);
-			}
-			if (best_vector.error < error_threshold) break;
-
-			// update current block position
-			if (cur_x == best_vector.x && cur_y == best_vector.y) {
-				step_size /= 2;
-			}
-			else {
-				cur_x = best_vector.x;
-				cur_y = best_vector.y;
 			}
 		}
-		if (best_vector.error < error_threshold) break;
+
+		// up left by half pixel
+		prev = prev_map.at(ShiftDir::UPLEFT) + vert_offset + hor_offset;
+		tmp_x = cur_x;
+		tmp_y = cur_y;
+		CheckAndUpdateBestMV(best_vector, ShiftDir::UPLEFT,
+			prev, cur, tmp_x, tmp_y);
+		if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+			StoreBestMVInMap(best_vector, cur_ind);
+			return;
+		}
+
+		// down right by half pixel
+		prev = prev_map.at(ShiftDir::UPLEFT) + vert_offset + hor_offset;
+		tmp_x = cur_x + 1;
+		tmp_y = cur_y + 1;
+		if (tmp_x <= BORDER && tmp_y <= BORDER) {
+			CheckAndUpdateBestMV(best_vector, ShiftDir::UPLEFT,
+				prev, cur, tmp_x, tmp_y);
+			if (best_vector.error < error_threshold || (--num_steps <= 0)) {
+				StoreBestMVInMap(best_vector, cur_ind);
+				return;
+			}
+		}
 
 	}
 
