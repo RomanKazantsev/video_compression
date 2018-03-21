@@ -110,6 +110,10 @@ private:
 		const uint8_t*> const & prev_map, const uint8_t* cur,
 		int hor_offset, int vert_offset, int i, int j);
 
+	void AdvancedSearch8x8(MV &best_vector, std::unordered_map<ShiftDir,
+		const uint8_t*> const & prev_map, const uint8_t* cur,
+		int hor_offset, int vert_offset, int i, int j);
+
 	void CrossSearch(MV &best_vector, std::unordered_map<ShiftDir,
 		const uint8_t*> const & prev_map, const uint8_t* cur,
 		int hor_offset, int vert_offset);
@@ -122,9 +126,13 @@ private:
 		const uint8_t*> const & prev_map, const uint8_t* cur,
 		int hor_offset, int vert_offset);
 
-	void MotionEstimator::CheckAndUpdateBestMV(MV &best_vector,
+	void CheckAndUpdateBestMV(MV &best_vector,
 		ShiftDir shift_dir, const uint8_t* prev,
 		const uint8_t* cur, int try_x, int try_y);
 
-	void StoreBestMVInMap(MV const &best_vector, int const ind);
+	void CheckAndUpdateBestMV8x8(MV &best_vector,
+		MV &candidate_vector, std::unordered_map<ShiftDir,
+		const uint8_t*> const & prev_map, const uint8_t* cur, int i, int j);
+
+	void StoreBestMVInMap(MV &best_vector, int const ind);
 };
